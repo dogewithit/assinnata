@@ -1,9 +1,9 @@
 # Matteo Assinnata
 
-**Head of DevOps @ Aziona Ventures**
+**Trading Engineering Manager @ 21Shares / Amun**
 
 ## About
-With seven years of working experience in IT Financial Services, IT Strategy, Software Architecture, Software Development,  Digital Transformation, and Innovation. I am most skilled in these competence centers:
+With nine years of working experience in IT Financial Services, IT Strategy, Software Architecture, Software Development,  Digital Transformation, and Innovation. I am most skilled in these competence centers:
 - Infrastructure as Code, Infrastructure as a Service, Software as a Service
 - Continuous Integration / Continuous Delivery and SDLC
 - Infrastructure and Application Monitoring
