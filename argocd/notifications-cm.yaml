@@ -1,0 +1,63 @@
+# yamllint disable rule:line-length
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  # ── Service: Slack ────────────────────────────────────────────────────────
+  service.slack: |
+    token: $slack-token
+
+  # ── Templates ─────────────────────────────────────────────────────────────
+  template.app-sync-failed: |
+    slack:
+      attachments: |
+        [{
+          "color": "#E53E3E",
+          "title": "Sync Failed: {{.app.metadata.name}}",
+          "text": "App *{{.app.metadata.name}}* failed to sync.\nRevision: {{.app.status.sync.revision}}\nStatus: {{.app.status.sync.status}}",
+          "footer": "ArgoCD | {{.app.metadata.namespace}}"
+        }]
+
+  template.app-sync-succeeded: |
+    slack:
+      attachments: |
+        [{
+          "color": "#38A169",
+          "title": "Sync Succeeded: {{.app.metadata.name}}",
+          "text": "App *{{.app.metadata.name}}* synced OK.\nRevision: {{.app.status.sync.revision}}\nStatus: {{.app.status.sync.status}}",
+          "footer": "ArgoCD | {{.app.metadata.namespace}}"
+        }]
+
+  template.app-health-degraded: |
+    slack:
+      attachments: |
+        [{
+          "color": "#D69E2E",
+          "title": "Health Degraded: {{.app.metadata.name}}",
+          "text": "App *{{.app.metadata.name}}* health is degraded.\nRevision: {{.app.status.sync.revision}}\nHealth: {{.app.status.health.status}}",
+          "footer": "ArgoCD | {{.app.metadata.namespace}}"
+        }]
+
+  # ── Triggers ──────────────────────────────────────────────────────────────
+  trigger.on-sync-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      send: [app-sync-failed]
+
+  trigger.on-sync-succeeded: |
+    - when: app.status.operationState.phase in ['Succeeded']
+      send: [app-sync-succeeded]
+
+  trigger.on-health-degraded: |
+    - when: app.status.health.status == 'Degraded'
+      send: [app-health-degraded]
+
+  # ── Default subscriptions ─────────────────────────────────────────────────
+  subscriptions: |
+    - recipients:
+        - slack:deployments
+      triggers:
+        - on-sync-failed
+        - on-sync-succeeded
+        - on-health-degraded

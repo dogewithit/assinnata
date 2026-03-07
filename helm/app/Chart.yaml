@@ -1,0 +1,24 @@
+apiVersion: v2
+name: app
+description: |
+  Helm chart for the app service.
+  Image tag is automatically updated by the CI pipeline (see .github/workflows/build-release.yml).
+  ArgoCD watches this chart and syncs the cluster on every tag change.
+
+type: application
+
+# Chart version: bump when chart templates change (independent from app version)
+version: 0.1.0
+
+# appVersion is kept in sync with git tag / semver releases via release pipeline.
+# The running image tag is managed via values.image.tag — not this field.
+appVersion: "0.1.0"
+
+keywords:
+  - app
+  - gitops
+  - argocd
+
+maintainers:
+  - name: Matteo Assinnata
+    url: https://linkedin.com/in/assinnata

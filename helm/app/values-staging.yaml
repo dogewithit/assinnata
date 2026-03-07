@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Staging environment overrides
+# Merged on top of values.yaml by ArgoCD:
+#   valueFiles: [values.yaml, values-staging.yaml]
+# ─────────────────────────────────────────────────────────────────────────────
+
+replicaCount: 1
+
+image:
+  tag: "latest"
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 64Mi
+  requests:
+    cpu: 50m
+    memory: 32Mi
+
+autoscaling:
+  enabled: false
+
+podAnnotations:
+  environment: staging
