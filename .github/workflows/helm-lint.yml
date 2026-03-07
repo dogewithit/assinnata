@@ -82,12 +82,14 @@ jobs:
       - name: Install yamllint
         run: pip install yamllint
 
-      - name: Lint all chart YAML files
+      # templates/ contains Go template syntax ({{ }}) — not valid YAML.
+      # Only lint chart metadata: Chart.yaml and values files.
+      - name: Lint chart metadata YAML
         run: |
-          yamllint \
+          find helm -name "Chart.yaml" -o -name "values*.yaml" | sort | \
+          xargs yamllint \
             -d "{extends: default, rules: {line-length: {max: 120}, \
-                document-start: disable, truthy: {allowed-values: ['true', 'false']}}}" \
-            helm/
+                document-start: disable, truthy: {allowed-values: ['true', 'false']}}}"
 
   # ── 3. Helm lint ────────────────────────────────────────────────────────────
   helm-lint:
