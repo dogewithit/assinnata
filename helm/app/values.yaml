@@ -15,7 +15,8 @@ image:
   #   DO NOT edit this line manually — it is managed by automation.
   tag: "latest"
 
-imagePullSecrets: []
+imagePullSecrets:
+  - name: ghcr-pull-secret
 
 nameOverride: ""
 fullnameOverride: ""

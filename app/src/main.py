@@ -20,7 +20,7 @@ def readiness():
 
 @app.get("/")
 def root():
-    return {"service": "app", "version": os.getenv("APP_VERSION", "dev")}
+    return {"service": "app", "version": os.getenv("APP_VERSION", "dev"), "gitops": True}
 
 
 if __name__ == "__main__":
