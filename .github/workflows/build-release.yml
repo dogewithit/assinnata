@@ -272,11 +272,16 @@ jobs:
             --method POST \
             -H "Accept: application/vnd.github+json" \
             /repos/${{ github.repository }}/deployments \
-            -f ref="${{ github.sha }}" \
-            -f environment="production" \
-            -f description="Deploy ${SERVICE} @ ${{ github.sha }}" \
-            -F auto_merge=false \
-            -f required_contexts='[]')
+            --input - <<'JSON'
+          {
+            "ref": "${{ github.sha }}",
+            "environment": "production",
+            "description": "Deploy ${{ matrix.service }} @ ${{ github.sha }}",
+            "auto_merge": false,
+            "required_contexts": []
+          }
+          JSON
+          )
 
           DEPLOYMENT_ID=$(echo "$RESPONSE" | jq -r '.id')
           echo "deployment_id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
