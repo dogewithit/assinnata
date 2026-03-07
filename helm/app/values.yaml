@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Default values for the app Helm chart.
+#
+# The CI pipeline automatically patches image.tag with the exact git commit SHA
+# on every successful build merged to master.  Do NOT edit image.tag manually.
+# ─────────────────────────────────────────────────────────────────────────────
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/dogewithit/assinnata/app
+  pullPolicy: IfNotPresent
+  # ↓ Automatically overwritten by the CI pipeline on every build.
+  #   Value format: full 40-character git commit SHA (e.g. a3b4c5d6...)
+  #   DO NOT edit this line manually — it is managed by automation.
+  tag: "latest"
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 2000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Extra environment variables injected from Kubernetes secrets
+envFromSecrets: []
+#  - secretName: app-secrets
+#    optional: false
+
+nodeSelector: {}
+tolerations: []
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: app
+          topologyKey: kubernetes.io/hostname
