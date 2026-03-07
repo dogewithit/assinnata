@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production environment overrides
+# Merged on top of values.yaml by ArgoCD:
+#   valueFiles: [values.yaml, values-production.yaml]
+# ─────────────────────────────────────────────────────────────────────────────
+
+replicaCount: 3
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 256Mi
+  requests:
+    cpu: 200m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 70
+
+podAnnotations:
+  environment: production
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
