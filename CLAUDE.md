@@ -8,53 +8,89 @@ to `master`.
 
 ---
 
-## Branching & CI/CD Flow
+## Two Pipelines — Responsibilities
+
+| Pipeline | File | Triggered by | Purpose |
+|----------|------|-------------|---------|
+| **Build & Release** | `build-release.yml` | `app/**` changes | Docker build → GHCR push → Helm write-back → ArgoCD deploy |
+| **Helm Lint & Validate** | `helm-lint.yml` | `helm/**` changes | yamllint → helm lint → helm template → kubeconform |
+
+---
+
+## Pipeline 1 — Build & Release (`build-release.yml`)
 
 ```
-feat/xxxx  ──▶  PR (open against master)
+feat/xxxx  ──▶  PR (app/** changed)
                  │
-                 │  GitHub Actions: Build & Release
-                 │   1. detect-changes  — did app/** change?
-                 │   2. build           — docker build (NO push, validates only)
-                 │   3. update-helm     — SKIPPED on PRs
-                 │   4. notify-deploy   — SKIPPED on PRs
+                 │  build-release.yml
+                 │   1. detect-changes  — app/** filter (must be true to proceed)
+                 │   2. build           — docker build only, NO push, NO helm
                  ▼
-              Merge to master
+              Merge to master (app/** changed)
                  │
-                 │  GitHub Actions: Build & Release
-                 │   1. detect-changes  — app/** changed? (must be true to proceed)
+                 │  build-release.yml
+                 │   1. detect-changes  — app/** changed
                  │   2. build           — docker build + push to GHCR (full SHA tag)
-                 │   3. update-helm     — yq patches helm/app/values.yaml image.tag
-                 │                        commits "chore(helm): ... [skip ci]" to master
+                 │   3. update-helm     — yq: helm/app/values.yaml image.tag = <sha>
+                 │                        git commit "[skip ci]" → pushed to master
                  │   4. notify-deploy   — GitHub Deployment event (state: success)
                  ▼
-              ArgoCD (polls git every ~3 min)
+              helm/app/values.yaml updated on master
                  │
-                 │  detects helm/app/values.yaml change
-                 │  helm template diff → kubectl apply
-                 │  automated: prune=true, selfHeal=true
+                 │  helm-lint.yml is NOT triggered — "[skip ci]" suppresses all workflows
+                 │  ArgoCD IS triggered — it polls git directly, ignores [skip ci]
                  ▼
-              Kubernetes namespace: app
+              ArgoCD auto-sync
                  │
-                 │  RollingUpdate — 2 pods across 2 nodes
-                 │  readinessProbe /readyz gates traffic
+                 │  detects values.yaml change, helm diff, kubectl apply
                  ▼
-              Running: ghcr.io/dogewithit/assinnata/app:<full-sha>
+              Kubernetes — 2 pods rolling update, new SHA image
 ```
 
-### Key rules
+### Build & Release trigger rules
 
-| Condition | build | update-helm | notify-deployment |
-|-----------|-------|-------------|-------------------|
-| PR — `app/**` changed | ✓ build-only (no push) | ✗ | ✗ |
+| Condition | build | update-helm | notify-deploy |
+|-----------|-------|-------------|---------------|
+| PR — `app/**` changed | ✓ build only (no push) | ✗ | ✗ |
 | push master — `app/**` changed | ✓ build + push | ✓ | ✓ |
-| push master — workflow file only | ✗ skipped | ✗ | ✗ |
-| push master — `helm/**` only | ✗ (path filter) | ✗ | ✗ |
+| push master — `helm/**` only | ✗ path filter miss | ✗ | ✗ |
+| push master — docs/workflow only | ✗ path filter miss | ✗ | ✗ |
+| helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ |
+
+---
+
+## Pipeline 2 — Helm Lint & Validate (`helm-lint.yml`)
+
+```
+feat/xxxx  ──▶  PR (helm/** changed)
+                 │
+                 │  helm-lint.yml
+                 │   1. detect-charts   — helm/** path filter
+                 │   2. yamllint        — YAML syntax on all chart files
+                 │   3. helm-lint       — helm lint --strict (default + env overlays)
+                 │   4. helm-template   — helm template --dry-run, uploads artifacts
+                 │   5. kubeconform     — validate rendered YAML vs k8s 1.34 schemas
+                 ▼
+              Merge to master (helm/** changed)
+                 │
+                 │  helm-lint.yml runs same jobs again on master
+                 ▼
+              ArgoCD auto-sync (if template changes affect live state)
+```
+
+### Helm lint trigger rules
+
+| Condition | yamllint | helm-lint | helm-template | kubeconform |
+|-----------|----------|-----------|---------------|-------------|
+| PR — `helm/**` changed | ✓ | ✓ | ✓ | ✓ |
+| push master — `helm/**` changed | ✓ | ✓ | ✓ | ✓ |
+| helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ | ✗ |
+| `app/**` changes only | ✗ path filter miss | ✗ | ✗ | ✗ |
 
 ### Loop-prevention (two independent guards)
 
-1. **Path filter** — `on.push.paths: [app/**, .github/workflows/...]`. A helm write-back commit never matches, so it never re-triggers the workflow.
-2. **`[skip ci]`** — the helm write-back commit message carries this tag. Fallback if paths filter is ever misconfigured.
+1. **Path filters** — `build-release.yml` watches only `app/**`. `helm-lint.yml` watches only `helm/**`. The two pipelines never cross-trigger.
+2. **`[skip ci]`** — the automated `image.tag` write-back carries this tag, suppressing both pipelines on that commit. ArgoCD polls git directly and is unaffected.
 
 ---
 
@@ -63,7 +99,8 @@ feat/xxxx  ──▶  PR (open against master)
 ```
 .github/
   workflows/
-    build-release.yml   CI pipeline (detect → build → helm → deploy event)
+    build-release.yml   Pipeline 1: app/** → docker build → GHCR push → helm write-back
+    helm-lint.yml       Pipeline 2: helm/** → yamllint → helm lint → template → kubeconform
   dependabot.yml        Weekly updates: Actions, Docker, Python packages
 app/
   Dockerfile            Multi-stage Python build (builder + slim runtime)

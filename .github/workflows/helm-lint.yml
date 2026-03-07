@@ -1,0 +1,254 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Helm Chart Lint & Validate Pipeline
+#
+# Triggers on changes inside helm/ on both PRs and pushes to master.
+# The automated values.yaml write-back from build-release.yml carries
+# "[skip ci]" in its commit message, so that mechanical SHA bump never
+# re-runs this workflow.  Only intentional chart changes (templates, values,
+# Chart.yaml, helpers) are validated here.
+#
+# Jobs:
+#   1. detect-charts   → identify which charts changed
+#   2. yamllint        → YAML syntax on all chart files
+#   3. helm-lint       → helm lint (default + env overlays)
+#   4. helm-template   → helm template --dry-run (catch rendering errors)
+#   5. kubeconform     → validate rendered manifests against k8s API schemas
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Helm Lint & Validate
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - "helm/**"
+      - ".github/workflows/helm-lint.yml"
+
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - "helm/**"
+      - ".github/workflows/helm-lint.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true   # cancel older lint runs on the same branch
+
+permissions:
+  contents: read
+  pull-requests: write       # allows posting lint summary as PR comment
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Detect which charts actually changed ─────────────────────────────────
+  detect-charts:
+    name: Detect changed charts
+    runs-on: ubuntu-latest
+    outputs:
+      app_changed: ${{ steps.filter.outputs.app }}
+      any_changed:  ${{ steps.filter.outputs.app }}   # extend for more charts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Filter changed helm paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            app:
+              - "helm/app/**"
+
+  # ── 2. YAML syntax validation ───────────────────────────────────────────────
+  yamllint:
+    name: YAML lint
+    runs-on: ubuntu-latest
+    needs: detect-charts
+    if: needs.detect-charts.outputs.any_changed == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint all chart YAML files
+        run: |
+          yamllint \
+            -d "{extends: default, rules: {line-length: {max: 120}, \
+                document-start: disable, truthy: {allowed-values: ['true', 'false']}}}" \
+            helm/
+
+  # ── 3. Helm lint ────────────────────────────────────────────────────────────
+  helm-lint:
+    name: Helm lint (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    needs: detect-charts
+    if: needs.detect-charts.outputs.any_changed == 'true'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        chart:
+          - app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint — default values
+        run: |
+          helm lint helm/${{ matrix.chart }} \
+            --strict \
+            --set image.tag=lint-placeholder
+
+      - name: Lint — staging overlay
+        if: hashFiles(format('helm/{0}/values-staging.yaml', matrix.chart)) != ''
+        run: |
+          helm lint helm/${{ matrix.chart }} \
+            --strict \
+            --values helm/${{ matrix.chart }}/values-staging.yaml \
+            --set image.tag=lint-placeholder
+
+      - name: Lint — production overlay
+        if: hashFiles(format('helm/{0}/values-production.yaml', matrix.chart)) != ''
+        run: |
+          helm lint helm/${{ matrix.chart }} \
+            --strict \
+            --values helm/${{ matrix.chart }}/values-production.yaml \
+            --set image.tag=lint-placeholder
+
+  # ── 4. Helm template dry-run ────────────────────────────────────────────────
+  helm-template:
+    name: Helm template (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    needs: [detect-charts, helm-lint]
+    if: needs.detect-charts.outputs.any_changed == 'true'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        chart:
+          - app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Template — default
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --set image.tag=sha-000000 \
+            > /tmp/${{ matrix.chart }}-default.yaml
+          echo "Rendered $(wc -l < /tmp/${{ matrix.chart }}-default.yaml) lines"
+
+      - name: Template — staging
+        if: hashFiles(format('helm/{0}/values-staging.yaml', matrix.chart)) != ''
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --values helm/${{ matrix.chart }}/values-staging.yaml \
+            --set image.tag=sha-000000 \
+            > /tmp/${{ matrix.chart }}-staging.yaml
+
+      - name: Template — production
+        if: hashFiles(format('helm/{0}/values-production.yaml', matrix.chart)) != ''
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --values helm/${{ matrix.chart }}/values-production.yaml \
+            --set image.tag=sha-000000 \
+            > /tmp/${{ matrix.chart }}-production.yaml
+
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-${{ matrix.chart }}
+          path: /tmp/${{ matrix.chart }}-*.yaml
+          retention-days: 7
+
+  # ── 5. Kubernetes schema validation (kubeconform) ──────────────────────────
+  kubeconform:
+    name: Schema validate (${{ matrix.chart }})
+    runs-on: ubuntu-latest
+    needs: helm-template
+
+    strategy:
+      fail-fast: false
+      matrix:
+        chart:
+          - app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        run: |
+          KUBECONFORM_VERSION="v0.6.7"
+          curl -sSL \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Render and validate — default
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --set image.tag=sha-000000 \
+          | kubeconform \
+              --strict \
+              --ignore-missing-schemas \
+              --kubernetes-version 1.34.0 \
+              --summary
+
+      - name: Render and validate — staging
+        if: hashFiles(format('helm/{0}/values-staging.yaml', matrix.chart)) != ''
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --values helm/${{ matrix.chart }}/values-staging.yaml \
+            --set image.tag=sha-000000 \
+          | kubeconform \
+              --strict \
+              --ignore-missing-schemas \
+              --kubernetes-version 1.34.0 \
+              --summary
+
+      - name: Render and validate — production
+        if: hashFiles(format('helm/{0}/values-production.yaml', matrix.chart)) != ''
+        run: |
+          helm template ${{ matrix.chart }} helm/${{ matrix.chart }} \
+            --values helm/${{ matrix.chart }}/values-production.yaml \
+            --set image.tag=sha-000000 \
+          | kubeconform \
+              --strict \
+              --ignore-missing-schemas \
+              --kubernetes-version 1.34.0 \
+              --summary
+
+      - name: Lint summary
+        if: always()
+        run: |
+          echo "### Helm Chart Validation Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Chart | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| yamllint        | ${{ matrix.chart }} | See yamllint job |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| helm lint       | ${{ matrix.chart }} | See helm-lint job |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| helm template   | ${{ matrix.chart }} | See helm-template job |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| kubeconform     | ${{ matrix.chart }} | See this job |" >> "$GITHUB_STEP_SUMMARY"

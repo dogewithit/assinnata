@@ -2,17 +2,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Build & Release Pipeline
 #
-# Triggers ONLY on changes inside app/ (or workflow file itself).
-# Changes to helm/ alone will NEVER trigger a build — path-filter is the
-# single source of truth and "skip-ci" commit messages add defence-in-depth.
+# Triggers ONLY on changes inside app/.
+# Changes to helm/ are handled by helm-lint.yml.
+# Changes to docs/, CLAUDE.md, or this workflow file do NOT trigger a build.
 #
 # Flow:
-#   1. detect-changes  → identify which services changed
-#   2. build           → docker build + push, tagged with full git SHA
+#   1. detect-changes  → identify which services changed (app/** path filter)
+#   2. build           → docker build + push to GHCR (push skipped on PRs)
 #   3. update-helm     → bump image.tag in helm/<service>/values.yaml
-#                        and commit back with [skip ci] to avoid re-trigger
+#                        commit "[skip ci]" → triggers helm-lint.yml is skipped
+#                        ArgoCD detects the values.yaml change and auto-syncs
+#   4. notify-deploy   → GitHub Deployment event (master only)
 #
-# ArgoCD watches helm/ and auto-syncs the cluster on every Helm commit.
+# Loop-prevention:
+#   • path filter:  helm/ writes never match app/** → workflow never re-fires
+#   • [skip ci]:    fallback guard on the write-back commit message
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Build & Release
@@ -22,10 +26,10 @@ on:
     branches:
       - master
       - main
-    # ⬇ ONLY run when application code changes — NOT for helm/ or docs/
+    # Trigger ONLY on app source changes.
+    # helm/, docs/, .github/workflows/ changes intentionally excluded.
     paths:
       - "app/**"
-      - ".github/workflows/build-release.yml"
 
   pull_request:
     branches:
@@ -33,7 +37,6 @@ on:
       - main
     paths:
       - "app/**"
-      - ".github/workflows/build-release.yml"
 
 # One build per branch at a time; don't cancel running builds (queue instead).
 concurrency:
