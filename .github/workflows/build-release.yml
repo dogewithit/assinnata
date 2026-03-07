@@ -59,8 +59,8 @@ jobs:
     name: Detect changed services
     runs-on: ubuntu-latest
     outputs:
-      services: ${{ steps.filter.outputs.services }}
-      matrix:   ${{ steps.build-matrix.outputs.matrix }}
+      app_changed: ${{ steps.filter.outputs.app }}
+      matrix:      ${{ steps.build-matrix.outputs.matrix }}
 
     steps:
       - name: Checkout
@@ -89,10 +89,9 @@ jobs:
   build:
     name: Build ${{ matrix.service }}
     needs: detect-changes
-    # Skip if the service did not change (on PRs this avoids wasted builds)
-    if: |
-      github.event_name == 'push' ||
-      needs.detect-changes.outputs.services == 'true'
+    # Run on PR (validate) or on push to master — only when app/** actually changed.
+    # Workflow-file-only pushes are intentionally skipped.
+    if: needs.detect-changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     strategy:
@@ -168,8 +167,8 @@ jobs:
   update-helm:
     name: Helm tag update (${{ matrix.service }})
     needs: [detect-changes, build]
-    # Only run on real merges to master/main — not on PRs
-    if: github.event_name == 'push'
+    # Only run on real merges to master/main where app code actually changed
+    if: github.event_name == 'push' && needs.detect-changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     strategy:
@@ -254,7 +253,7 @@ jobs:
   notify-deployment:
     name: Notify deployment (${{ matrix.service }})
     needs: [detect-changes, update-helm]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.detect-changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     strategy:
