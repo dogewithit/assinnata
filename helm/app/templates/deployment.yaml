@@ -79,3 +79,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+          # gitops-pipeline: verified
