@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0          # need full history for accurate diffing
 
@@ -105,16 +105,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ── Docker Buildx (multi-platform capable) ────────────────────────────
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # ── Authenticate to GHCR ──────────────────────────────────────────────
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -128,7 +128,7 @@ jobs:
       #   • "latest" only on master/main push
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
           tags: |
@@ -142,7 +142,7 @@ jobs:
 
       # ── Build (and push on non-PR events) ────────────────────────────────
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: ./${{ matrix.service }}
           file:    ./${{ matrix.service }}/Dockerfile
@@ -178,7 +178,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Use PAT so the push triggers ArgoCD but NOT this workflow.
           # Falls back to GITHUB_TOKEN — combined with [skip ci] it is safe.
@@ -192,7 +192,7 @@ jobs:
       # ── Rewrite image.tag in values.yaml with the FULL commit SHA ─────────
       # Using yq for safe YAML mutation (no fragile sed patterns)
       - name: Install yq
-        uses: mikefarah/yq@v4.40.5
+        uses: mikefarah/yq@v4.52.4
 
       - name: Update image tag in Helm values
         id: helm-update
