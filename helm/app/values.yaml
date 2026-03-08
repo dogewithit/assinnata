@@ -12,7 +12,7 @@ image:
   # ↓ Automatically overwritten by the CI pipeline on every build.
   #   Value format: full 40-character git commit SHA (e.g. a3b4c5d6...)
   #   DO NOT edit this line manually — it is managed by automation.
-  tag: "c07a48a914f534ff6f0178c2753b3201ea95e6e8"
+  tag: "4ba7a4e0b71ffb280d8c45854e9caa3b68612fae"
 imagePullSecrets:
   - name: ghcr-pull-secret
 nameOverride: ""
