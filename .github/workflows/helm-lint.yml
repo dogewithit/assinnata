@@ -2,33 +2,26 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Helm Chart Lint & Validate Pipeline
 #
-# Triggers on changes inside helm/ on both PRs and pushes to master.
-# The automated values.yaml write-back from build-release.yml carries
-# "[skip ci]" in its commit message, so that mechanical SHA bump never
-# re-runs this workflow.  Only intentional chart changes (templates, values,
-# Chart.yaml, helpers) are validated here.
+# Runs on FEATURE BRANCHES ONLY — never on master/main.
+# master is exclusively managed by ArgoCD.
+#
+# Triggered by intentional helm/** changes on feature branches (templates,
+# Chart.yaml, values files). The automated image.tag write-back from
+# build-release.yml carries "[skip ci]" so it never re-runs this workflow.
 #
 # Jobs:
 #   1. detect-charts   → identify which charts changed
-#   2. yamllint        → YAML syntax on all chart files
-#   3. helm-lint       → helm lint (default + env overlays)
-#   4. helm-template   → helm template --dry-run (catch rendering errors)
-#   5. kubeconform     → validate rendered manifests against k8s API schemas
+#   2. yamllint        → YAML syntax on Chart.yaml + values files (not templates)
+#   3. helm-lint       → helm lint --strict (default + env overlays)
+#   4. helm-template   → helm template --dry-run, uploads rendered manifests
+#   5. kubeconform     → validate rendered YAML against k8s 1.34 schemas
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Helm Lint & Validate
 
 on:
   push:
-    branches:
-      - master
-      - main
-    paths:
-      - "helm/**"
-      - ".github/workflows/helm-lint.yml"
-
-  pull_request:
-    branches:
+    branches-ignore:
       - master
       - main
     paths:

@@ -2,46 +2,39 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Build & Release Pipeline
 #
-# Triggers ONLY on changes inside app/.
-# Changes to helm/ are handled by helm-lint.yml.
-# Changes to docs/, CLAUDE.md, or this workflow file do NOT trigger a build.
+# Runs on FEATURE BRANCHES ONLY — never on master/main.
+# master is exclusively managed by ArgoCD.
 #
-# Flow:
-#   1. detect-changes  → identify which services changed (app/** path filter)
-#   2. build           → docker build + push to GHCR (push skipped on PRs)
+# Flow (triggered on push to any non-master branch, app/** changed):
+#   1. detect-changes  → check if app/** actually changed (skip helm-only pushes)
+#   2. build           → docker build + push to GHCR (full git SHA tag)
 #   3. update-helm     → bump image.tag in helm/<service>/values.yaml
-#                        commit "[skip ci]" → triggers helm-lint.yml is skipped
-#                        ArgoCD detects the values.yaml change and auto-syncs
-#   4. notify-deploy   → GitHub Deployment event (master only)
+#                        commit "[skip ci]" back to the feature branch
+#
+# On PR merge to master:
+#   • NO pipeline runs on master
+#   • ArgoCD detects the updated values.yaml and auto-syncs the cluster
 #
 # Loop-prevention:
-#   • path filter:  helm/ writes never match app/** → workflow never re-fires
-#   • [skip ci]:    fallback guard on the write-back commit message
+#   • branches-ignore: [master, main] — pipeline never fires on master
+#   • path filter app/**              — helm write-back doesn't match, safe
+#   • [skip ci] in write-back commit  — second guard for the feature branch loop
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Build & Release
 
 on:
   push:
-    branches:
-      - master
-      - main
-    # Trigger ONLY on app source changes.
-    # helm/, docs/, .github/workflows/ changes intentionally excluded.
-    paths:
-      - "app/**"
-
-  pull_request:
-    branches:
+    branches-ignore:
       - master
       - main
     paths:
       - "app/**"
 
-# One build per branch at a time; don't cancel running builds (queue instead).
+# One build per branch at a time; cancel older run if a new push arrives.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 # ─── Global defaults ──────────────────────────────────────────────────────────
 env:
@@ -49,10 +42,8 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 permissions:
-  contents: write          # needed to push the helm tag-update commit back
-  packages: write          # needed to push to GHCR
-  pull-requests: read
-  deployments: write       # needed to post GitHub Deployment events
+  contents: write   # push helm write-back commit to feature branch
+  packages: write   # push image to GHCR
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -69,9 +60,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # need full history for accurate diffing
+          fetch-depth: 0
 
-      # dorny/paths-filter: produce per-service change flags
       - name: Filter changed paths
         id: filter
         uses: dorny/paths-filter@v3
@@ -80,20 +70,16 @@ jobs:
             app:
               - "app/**"
 
-      # Emit a JSON matrix so the build job can fan out per-service.
-      # Extend this list as you add services under app/.
       - name: Build job matrix
         id: build-matrix
         run: |
           services='["app"]'
           echo "matrix={\"service\":${services}}" >> "$GITHUB_OUTPUT"
 
-  # ── 2. Build Docker image and push to registry ─────────────────────────────
+  # ── 2. Build Docker image and push to GHCR ─────────────────────────────────
   build:
     name: Build ${{ matrix.service }}
     needs: detect-changes
-    # Run on PR (validate) or on push to master — only when app/** actually changed.
-    # Workflow-file-only pushes are intentionally skipped.
     if: needs.detect-changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
@@ -102,32 +88,24 @@ jobs:
       matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
 
     outputs:
-      # Pass the exact SHA tag downstream so helm-update can use it
       image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Docker Buildx (multi-platform capable) ────────────────────────────
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── Authenticate to GHCR ──────────────────────────────────────────────
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Derive image metadata (tags + labels) ─────────────────────────────
-      # Tags produced:
-      #   • Full SHA  (always)                → used in Helm
-      #   • Short SHA (convenience)
-      #   • Branch name
-      #   • "latest" only on master/main push
+      # Tags: full SHA (used in Helm), short SHA, branch name
+      # "latest" tag is intentionally omitted — only meaningful on master
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -137,41 +115,36 @@ jobs:
             type=sha,format=long,prefix=
             type=sha,format=short,prefix=sha-
             type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=${{ matrix.service }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      # ── Build (and push on non-PR events) ────────────────────────────────
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./${{ matrix.service }}
           file:    ./${{ matrix.service }}/Dockerfile
-          push:    ${{ github.event_name != 'pull_request' }}
+          push:    true
           tags:    ${{ steps.meta.outputs.tags }}
           labels:  ${{ steps.meta.outputs.labels }}
-          # Layer cache: re-use across runs, never bloats the registry
           cache-from: type=gha
           cache-to:   type=gha,mode=max
-          # Build provenance attestation (supply-chain hardening)
           provenance: true
           sbom:       true
 
-      # ── Expose the full-SHA tag as a job output ───────────────────────────
       - name: Export image tag
         id: export-tag
         run: |
-          FULL_SHA="${{ github.sha }}"
-          echo "IMAGE_TAG=${FULL_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Built image tag: ${FULL_SHA}"
+          echo "IMAGE_TAG=${{ github.sha }}"
+          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-  # ── 3. Update Helm chart with the exact commit SHA ─────────────────────────
+  # ── 3. Write image SHA back to helm values on this feature branch ───────────
+  # The updated values.yaml is included in the PR and lands on master at merge.
+  # ArgoCD detects the master change and syncs — no pipeline runs on master.
   update-helm:
     name: Helm tag update (${{ matrix.service }})
     needs: [detect-changes, build]
-    # Only run on real merges to master/main where app code actually changed
-    if: github.event_name == 'push' && needs.detect-changes.outputs.app_changed == 'true'
+    if: needs.detect-changes.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
 
     strategy:
@@ -182,17 +155,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Use PAT so the push triggers ArgoCD but NOT this workflow.
-          # Falls back to GITHUB_TOKEN — combined with [skip ci] it is safe.
           token: ${{ secrets.GIT_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
-          # Fetch the latest HEAD (concurrent builds may have pushed)
           fetch-depth: 0
 
       - name: Pull latest to avoid conflicts
         run: git pull --rebase origin "${{ github.ref_name }}"
 
-      # ── Rewrite image.tag in values.yaml with the FULL commit SHA ─────────
-      # Using yq for safe YAML mutation (no fragile sed patterns)
       - name: Install yq
         uses: mikefarah/yq@v4.40.5
 
@@ -203,111 +171,46 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           VALUES_FILE="helm/${SERVICE}/values.yaml"
-
           echo "Patching ${VALUES_FILE} → image.tag=${IMAGE_TAG}"
           yq e ".image.tag = \"${IMAGE_TAG}\"" -i "${VALUES_FILE}"
-
           echo "values_file=${VALUES_FILE}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_TAG}"     >> "$GITHUB_OUTPUT"
 
-      # ── Commit and push back — [skip ci] prevents build loop ──────────────
-      # The push goes directly to the base branch (master/main).
-      # ArgoCD detects this git change and syncs the cluster automatically.
-      - name: Commit and push Helm update
+      # Commit back to the feature branch with [skip ci] to prevent loop.
+      # This commit will be included in the PR and merged to master,
+      # where ArgoCD picks it up and syncs the cluster.
+      - name: Commit and push Helm update to feature branch
         env:
-          IMAGE_TAG:    ${{ github.sha }}
-          SERVICE:      ${{ matrix.service }}
-          VALUES_FILE:  ${{ steps.helm-update.outputs.values_file }}
+          IMAGE_TAG:   ${{ github.sha }}
+          SERVICE:     ${{ matrix.service }}
+          VALUES_FILE: ${{ steps.helm-update.outputs.values_file }}
+          BRANCH:      ${{ github.ref_name }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add "${VALUES_FILE}"
 
-          # Bail out gracefully if nothing actually changed (idempotent runs)
           if git diff --cached --quiet; then
-            echo "No Helm change detected, skipping commit."
+            echo "Helm values already up to date — skipping commit."
             exit 0
           fi
 
-          # [skip ci] — both GitHub Actions and Gitea honour this convention.
-          # This PREVENTS the build workflow from re-triggering on this commit.
+          # [skip ci] prevents this commit from re-triggering the build loop
           git commit -m "chore(helm): update ${SERVICE} image.tag to ${IMAGE_TAG} [skip ci]
 
           Automated update by GitHub Actions build #${{ github.run_number }}.
           Source commit: ${{ github.sha }}
-          Triggered by: ${{ github.actor }}
+          Branch: ${BRANCH}
           "
 
-          git push origin "${{ github.ref_name }}"
+          git push origin "${BRANCH}"
 
-      # ── Summary ───────────────────────────────────────────────────────────
       - name: Annotate job summary
         run: |
           echo "### Helm Tag Update" >> "$GITHUB_STEP_SUMMARY"
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Service       | \`${{ matrix.service }}\`      |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image tag     | \`${{ github.sha }}\`          |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Values file   | \`${{ steps.helm-update.outputs.values_file }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| ArgoCD sync   | Triggered automatically via git push |" >> "$GITHUB_STEP_SUMMARY"
-
-  # ── 4. Post a GitHub Deployment event ──────────────────────────────────────
-  notify-deployment:
-    name: Notify deployment (${{ matrix.service }})
-    needs: [detect-changes, update-helm]
-    if: github.event_name == 'push' && needs.detect-changes.outputs.app_changed == 'true'
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-
-    steps:
-      - name: Create GitHub Deployment
-        id: create-deployment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SERVICE:  ${{ matrix.service }}
-        run: |
-          RESPONSE=$(gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /repos/${{ github.repository }}/deployments \
-            --input - <<'JSON'
-          {
-            "ref": "${{ github.sha }}",
-            "environment": "production",
-            "description": "Deploy ${{ matrix.service }} @ ${{ github.sha }}",
-            "auto_merge": false,
-            "required_contexts": []
-          }
-          JSON
-          )
-
-          DEPLOYMENT_ID=$(echo "$RESPONSE" | jq -r '.id')
-          echo "deployment_id=${DEPLOYMENT_ID}" >> "$GITHUB_OUTPUT"
-          echo "Created deployment ID: ${DEPLOYMENT_ID}"
-
-      - name: Update Deployment status to success
-        env:
-          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
-          DEPLOYMENT_ID: ${{ steps.create-deployment.outputs.deployment_id }}
-          SERVICE_URL:  ${{ vars.SERVICE_URL }}
-        run: |
-          EXTRA_ARGS=""
-          if [[ -n "${SERVICE_URL}" ]]; then
-            EXTRA_ARGS="-f environment_url=${SERVICE_URL}"
-          fi
-
-          # shellcheck disable=SC2086
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /repos/${{ github.repository }}/deployments/"${DEPLOYMENT_ID}"/statuses \
-            -f state="success" \
-            -f environment="production" \
-            -f description="Deployment succeeded — ArgoCD syncing" \
-            ${EXTRA_ARGS}
-
-          echo "Deployment ${DEPLOYMENT_ID} marked as success."
+          echo "| Service     | \`${{ matrix.service }}\`                               |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image tag   | \`${{ github.sha }}\`                                   |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch      | \`${{ github.ref_name }}\`                              |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Next step   | Merge PR → ArgoCD detects master change → auto-sync    |" >> "$GITHUB_STEP_SUMMARY"

@@ -10,87 +10,75 @@ to `master`.
 
 ## Two Pipelines — Responsibilities
 
+**Both pipelines run on feature branches only. master is owned exclusively by ArgoCD.**
+
 | Pipeline | File | Triggered by | Purpose |
 |----------|------|-------------|---------|
-| **Build & Release** | `build-release.yml` | `app/**` changes | Docker build → GHCR push → Helm write-back → ArgoCD deploy |
-| **Helm Lint & Validate** | `helm-lint.yml` | `helm/**` changes | yamllint → helm lint → helm template → kubeconform |
+| **Build & Release** | `build-release.yml` | push non-master, `app/**` | build + push GHCR + write helm SHA back to feature branch |
+| **Helm Lint & Validate** | `helm-lint.yml` | push non-master, `helm/**` | yamllint + helm lint + template + kubeconform |
 
 ---
 
-## Pipeline 1 — Build & Release (`build-release.yml`)
+## Full Flow
 
 ```
-feat/xxxx  ──▶  PR (app/** changed)
-                 │
-                 │  build-release.yml
-                 │   1. detect-changes  — app/** filter (must be true to proceed)
-                 │   2. build           — docker build only, NO push, NO helm
-                 ▼
-              Merge to master (app/** changed)
-                 │
-                 │  build-release.yml
-                 │   1. detect-changes  — app/** changed
-                 │   2. build           — docker build + push to GHCR (full SHA tag)
-                 │   3. update-helm     — yq: helm/app/values.yaml image.tag = <sha>
-                 │                        git commit "[skip ci]" → pushed to master
-                 │   4. notify-deploy   — GitHub Deployment event (state: success)
-                 ▼
-              helm/app/values.yaml updated on master
-                 │
-                 │  helm-lint.yml is NOT triggered — "[skip ci]" suppresses all workflows
-                 │  ArgoCD IS triggered — it polls git directly, ignores [skip ci]
-                 ▼
-              ArgoCD auto-sync
-                 │
-                 │  detects values.yaml change, helm diff, kubectl apply
-                 ▼
-              Kubernetes — 2 pods rolling update, new SHA image
+Developer pushes app change to feat/xxxx
+    │
+    ├─ build-release.yml fires
+    │   1. detect-changes — app/** changed?
+    │   2. build          — docker build + push GHCR (full SHA tag)
+    │   3. update-helm    — values.yaml image.tag = <sha>
+    │                       commit "[skip ci]" back to feat/xxxx
+    │                       (loop stopped by [skip ci])
+
+Developer pushes helm change to feat/xxxx
+    │
+    ├─ helm-lint.yml fires
+    │   1. detect-charts  — helm/** changed?
+    │   2. yamllint       — Chart.yaml + values files (not Go templates)
+    │   3. helm-lint      — helm lint --strict (default + env overlays)
+    │   4. helm-template  — dry-run all value combos, upload artifacts
+    │   5. kubeconform    — validate vs k8s 1.34 schemas
+
+PR reviewed and merged to master
+    │
+    │   NO pipeline fires on master
+    │
+    └─ ArgoCD polls git (~3 min)
+        detects helm/app/values.yaml changed on master
+        helm diff → kubectl apply → RollingUpdate
+        2 pods on new SHA image, readinessProbe gating traffic
 ```
-
-### Build & Release trigger rules
-
-| Condition | build | update-helm | notify-deploy |
-|-----------|-------|-------------|---------------|
-| PR — `app/**` changed | ✓ build only (no push) | ✗ | ✗ |
-| push master — `app/**` changed | ✓ build + push | ✓ | ✓ |
-| push master — `helm/**` only | ✗ path filter miss | ✗ | ✗ |
-| push master — docs/workflow only | ✗ path filter miss | ✗ | ✗ |
-| helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ |
 
 ---
 
-## Pipeline 2 — Helm Lint & Validate (`helm-lint.yml`)
+## Pipeline 1 — Build & Release trigger rules
 
-```
-feat/xxxx  ──▶  PR (helm/** changed)
-                 │
-                 │  helm-lint.yml
-                 │   1. detect-charts   — helm/** path filter
-                 │   2. yamllint        — YAML syntax on all chart files
-                 │   3. helm-lint       — helm lint --strict (default + env overlays)
-                 │   4. helm-template   — helm template --dry-run, uploads artifacts
-                 │   5. kubeconform     — validate rendered YAML vs k8s 1.34 schemas
-                 ▼
-              Merge to master (helm/** changed)
-                 │
-                 │  helm-lint.yml runs same jobs again on master
-                 ▼
-              ArgoCD auto-sync (if template changes affect live state)
-```
+| Event | detect | build | update-helm |
+|-------|--------|-------|-------------|
+| push feat/xxxx — `app/**` changed | ✓ | ✓ build + push | ✓ SHA → branch |
+| push feat/xxxx — `helm/**` only | ✓ | ✗ app_changed=false | ✗ |
+| push feat/xxxx — helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ |
+| push to master | ✗ branches-ignore | ✗ | ✗ |
 
-### Helm lint trigger rules
+---
 
-| Condition | yamllint | helm-lint | helm-template | kubeconform |
-|-----------|----------|-----------|---------------|-------------|
-| PR — `helm/**` changed | ✓ | ✓ | ✓ | ✓ |
-| push master — `helm/**` changed | ✓ | ✓ | ✓ | ✓ |
-| helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ | ✗ |
-| `app/**` changes only | ✗ path filter miss | ✗ | ✗ | ✗ |
+## Pipeline 2 — Helm Lint trigger rules
 
-### Loop-prevention (two independent guards)
+| Event | yamllint | helm-lint | template | kubeconform |
+|-------|----------|-----------|----------|-------------|
+| push feat/xxxx — `helm/**` changed | ✓ | ✓ | ✓ | ✓ |
+| push feat/xxxx — `app/**` only | ✗ path miss | ✗ | ✗ | ✗ |
+| push feat/xxxx — helm write-back `[skip ci]` | ✗ suppressed | ✗ | ✗ | ✗ |
+| push to master | ✗ branches-ignore | ✗ | ✗ | ✗ |
 
-1. **Path filters** — `build-release.yml` watches only `app/**`. `helm-lint.yml` watches only `helm/**`. The two pipelines never cross-trigger.
-2. **`[skip ci]`** — the automated `image.tag` write-back carries this tag, suppressing both pipelines on that commit. ArgoCD polls git directly and is unaffected.
+---
+
+## Loop-Prevention (three independent guards)
+
+1. **`branches-ignore: [master, main]`** — neither pipeline ever runs on master. The PR merge is a CI-silent event; only ArgoCD reacts.
+2. **Path filters** — `build-release.yml` watches only `app/**`; `helm-lint.yml` watches only `helm/**`. A helm write-back would hit `helm/**` but guard 3 stops it.
+3. **`[skip ci]`** — the helm write-back commit message suppresses all GitHub Actions on that commit, including `helm-lint.yml`.
 
 ---
 
